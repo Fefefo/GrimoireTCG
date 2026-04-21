@@ -19,15 +19,21 @@
 		count: number;
 		scryfall_uri?: string;
 		scryfall_image_uri?: string;
+		scryfall_image_uri_back?: string;
 	};
 
 	type scryfallScheme = {
 		data: {
 			name: string;
 			scryfall_uri: string;
-			image_uris: {
+			image_uris?: {
 				border_crop: string;
 			};
+			card_faces?: {
+				image_uris?: {
+					border_crop: string;
+				};
+			}[];
 		}[];
 		not_found: {
 			name: string;
@@ -46,7 +52,6 @@
 	let stringAfterNumber = "x";
 
 	let regex = /^(\d+)?(\s+)?([^(\n\r]*)(\(.*)?/;
-	$inspect(scryCards);
 	// Adrix and Nev twincasters
 	async function elaborate() {
 		scryCards = [];
@@ -57,16 +62,17 @@
 			if (line.trim() == "") return "";
 			if (line.startsWith("#") || line.startsWith("!")) return line;
 			const matching = line.trim().match(regex);
+			const count = parseInt(matching ? (matching[1] != undefined ? matching[1] : "1") : "1");
 			if (matching && matching[3]) {
-				const name = normalizeString(matching[3]);
+				const name = normalizeString(matching[3].split("//")[0].trim());
 				if (cardCounter.has(name)) {
-					cardCounter.set(name, [cardCounter.get(name)![0] + 1, cardCounter.get(name)![1]]);
+					cardCounter.set(name, [cardCounter.get(name)![0] + count, cardCounter.get(name)![1]]);
 				} else {
-					cardCounter.set(name, [1, matching[3]]);
+					cardCounter.set(name, [count, matching[3]]);
 				}
 				// CardCounter.set(name, (CardCounter.get(name) ?? 0) + 1);
 				ordered.push(matching[3].trim());
-				sum++;
+				sum += count;
 			}
 		});
 		scryCards = await fetchScryfall(Array.from(cardCounter.keys()));
@@ -95,18 +101,37 @@
 			});
 			const schema: scryfallScheme = await response.json();
 			schema.data.forEach((el) => {
-				console.log(el.name, el.scryfall_uri);
-				scryCards.push({
-					name: el.name,
-					scryfall_uri: el.scryfall_uri.split("?")[0],
-					count: cardCounter.get(normalizeString(el.name))![0],
-					scryfall_image_uri: el.image_uris.border_crop
-				});
+				if (el.name.split("//").length > 1) {
+					el.name.split("//").forEach((e) => {
+						if (cardCounter.has(normalizeString(e))) {
+							cardCounter.set(normalizeString(el.name), cardCounter.get(normalizeString(e))!);
+							cardCounter.delete(normalizeString(e));
+						}
+					});
+				}
+				if (!el.image_uris && el.card_faces) {
+					scryCards.push({
+						name: el.name,
+						scryfall_uri: el.scryfall_uri.split("?")[0],
+						count: cardCounter.get(normalizeString(el.name))![0],
+						scryfall_image_uri: el.card_faces[0].image_uris?.border_crop,
+						scryfall_image_uri_back: el.card_faces[1].image_uris?.border_crop
+					});
+				} else {
+					scryCards.push({
+						name: el.name,
+						scryfall_uri: el.scryfall_uri.split("?")[0],
+						count: cardCounter.get(normalizeString(el.name))![0],
+						scryfall_image_uri: el.image_uris?.border_crop
+					});
+				}
 			});
 			schema.not_found.forEach((el) => {
 				scryCards.push({ name: el.name, count: cardCounter.get(normalizeString(el.name))![0] });
 			});
 		}
+		console.log(scryCards.length);
+		console.log(cardsName.length);
 		return scryCards;
 	}
 
@@ -182,7 +207,7 @@
 					>
 						{#each scryCards as card (card)}
 							<Tooltip.Provider>
-								<Tooltip.Root disableHoverableContent delayDuration="200">
+								<Tooltip.Root disableHoverableContent delayDuration={200}>
 									<Tooltip.Trigger class="text-left">
 										{#if card.scryfall_uri}
 											<a href={card.scryfall_uri} rel="external" target="_blank">
@@ -199,8 +224,11 @@
 										{/if}
 									</Tooltip.Trigger>
 									{#if card.scryfall_image_uri}
-										<Tooltip.Content>
+										<Tooltip.Content class="flex gap-2">
 											<img src={card.scryfall_image_uri} alt="" class="h-40" />
+											{#if card.scryfall_image_uri_back}
+												<img src={card.scryfall_image_uri_back} alt="" class="h-40" />
+											{/if}
 										</Tooltip.Content>
 									{/if}
 								</Tooltip.Root>
