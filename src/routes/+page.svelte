@@ -2,6 +2,10 @@
 	import { Textarea } from "$lib/components/ui/textarea/index.js";
 	import * as Button from "$lib/components/ui/button/index.js";
 	import Text from "$lib/components/ui/text/text.svelte";
+	import { SvelteMap } from "svelte/reactivity";
+	import * as Tooltip from "$lib/components/ui/tooltip/index.js";
+	import Copy from "$lib/assets/icons/copy.svelte";
+	import Error from "$lib/assets/icons/error.svelte";
 
 	type ygoproScheme = {
 		data: {
@@ -12,53 +16,72 @@
 
 	type scryfallCard = {
 		name: string;
-		scryfall_uri: string;
+		count: number;
+		scryfall_uri?: string;
+		scryfall_image_uri?: string;
 	};
 
 	type scryfallScheme = {
-		data: scryfallCard[];
+		data: {
+			name: string;
+			scryfall_uri: string;
+			image_uris: {
+				border_crop: string;
+			};
+		}[];
+		not_found: {
+			name: string;
+		}[];
 	};
+
+	let cardCounter = new SvelteMap<string, [number, string]>();
 
 	let scryCards = $state<scryfallCard[]>([]);
 
 	const apiYGOPRO = "https://db.ygoprodeck.com/api/v7/cardinfo.php?id=";
 
 	let input = $state("");
-	let output = $state("");
 
 	let sum = $state(0);
 	let stringAfterNumber = "x";
 
 	let regex = /^(\d+)?(\s+)?([^(\n\r]*)(\(.*)?/;
-
+	$inspect(scryCards);
+	// Adrix and Nev twincasters
 	async function elaborate() {
 		scryCards = [];
+		cardCounter = new SvelteMap<string, [number, string]>();
 		sum = 0;
-		output = input
-			.split(/\r?\n/)
-			.map((line) => {
-				if (line.trim() == "") return "";
-				if (line.startsWith("#") || line.startsWith("!")) return line;
-				line = line.trim().replace(regex, (_, n = 1, s, text) => {
-					const texttrim = text.trim();
-					scryCards.push({ name: texttrim, scryfall_uri: "" });
-					return `${n}${stringAfterNumber} ${texttrim}`;
-				});
-				sum += Number(line.match(/^(\d+)/)![0]);
-
-				return line;
-			})
-			.join("\n");
-		const cardsList = await fetchScryfall(scryCards.map((el) => el.name));
-		console.log(cardsList);
+		let ordered: string[] = [];
+		input.split(/\r?\n/).forEach((line) => {
+			if (line.trim() == "") return "";
+			if (line.startsWith("#") || line.startsWith("!")) return line;
+			const matching = line.trim().match(regex);
+			if (matching && matching[3]) {
+				const name = normalizeString(matching[3]);
+				if (cardCounter.has(name)) {
+					cardCounter.set(name, [cardCounter.get(name)![0] + 1, cardCounter.get(name)![1]]);
+				} else {
+					cardCounter.set(name, [1, matching[3]]);
+				}
+				// CardCounter.set(name, (CardCounter.get(name) ?? 0) + 1);
+				ordered.push(matching[3].trim());
+				sum++;
+			}
+		});
+		scryCards = await fetchScryfall(Array.from(cardCounter.keys()));
+		scryCards.map((el) => {
+			if (!el.scryfall_image_uri) {
+				el.name = ordered.find((elArr) => normalizeString(elArr) == el.name) ?? el.name;
+			}
+		});
+		scryCards = sortByFirstOccurrence(ordered, scryCards);
 	}
 
 	async function fetchScryfall(cardsName: string[]): Promise<scryfallCard[]> {
-		let cards: scryfallCard[] = [];
-		const uniqueCards = [...new Set(cardsName)];
-		for (let i = 0; i < uniqueCards.length; i += 75) {
-			const cardsChunk = uniqueCards.slice(i, (i += 75));
-			console.log(cardsChunk);
+		scryCards = [];
+		for (let i = 0; i < cardsName.length; i += 75) {
+			const cardsChunk = cardsName.slice(i, (i += 75));
 			const response = await fetch("https://api.scryfall.com/cards/collection", {
 				method: "POST",
 				headers: {
@@ -70,14 +93,21 @@
 					})
 				})
 			});
-			console.log(response);
 			const schema: scryfallScheme = await response.json();
-			console.log(schema);
 			schema.data.forEach((el) => {
-				cards.push({ name: el.name, scryfall_uri: el.scryfall_uri.split("?")[0] });
+				console.log(el.name, el.scryfall_uri);
+				scryCards.push({
+					name: el.name,
+					scryfall_uri: el.scryfall_uri.split("?")[0],
+					count: cardCounter.get(normalizeString(el.name))![0],
+					scryfall_image_uri: el.image_uris.border_crop
+				});
+			});
+			schema.not_found.forEach((el) => {
+				scryCards.push({ name: el.name, count: cardCounter.get(normalizeString(el.name))![0] });
 			});
 		}
-		return cards;
+		return scryCards;
 	}
 
 	async function ygoproparser() {
@@ -95,13 +125,47 @@
 			input = input.replaceAll(String(el.id), el.name);
 		});
 	}
+
+	function normalizeString(str: string): string {
+		return str
+			.toLowerCase()
+			.normalize("NFD")
+			.replace(/[\u0300-\u036f]/g, "")
+			.replace(/ß/g, "ss")
+			.replace(/æ/g, "ae")
+			.replace(/œ/g, "oe")
+			.replace(/ø/g, "o")
+			.replace(/[^\p{L}\p{N}]/gu, "");
+	}
+
+	function sortByFirstOccurrence(rawList: string[], scryCards: scryfallCard[]): scryfallCard[] {
+		// 1. costruisco mappa: normalized -> primo indice
+		const firstIndex = new SvelteMap<string, number>();
+
+		rawList.forEach((str, i) => {
+			const norm = normalizeString(str);
+
+			// salva solo la prima occorrenza
+			if (!firstIndex.has(norm)) {
+				firstIndex.set(norm, i);
+			}
+		});
+
+		// 2. ordino gli item
+		return scryCards.sort((a, b) => {
+			const indexA = firstIndex.get(normalizeString(a.name)) ?? Infinity;
+			const indexB = firstIndex.get(normalizeString(b.name)) ?? Infinity;
+
+			return indexA - indexB;
+		});
+	}
 </script>
 
 <div class="flex min-h-screen w-full flex-col">
 	<div class="flex w-full flex-1 flex-row flex-nowrap">
 		<div class="flex w-1/5 items-stretch bg-black opacity-20"></div>
 		<div class="w-3/5">
-			<Text as="h1" class="pt-6 pb-8 text-center">Deck Formatter</Text>
+			<Text as="h1" class="pt-6 pb-8 text-center">GrimoireTCG</Text>
 			<div class="flex w-full flex-row flex-wrap justify-evenly">
 				<div class="w-1/3">
 					<Textarea
@@ -112,12 +176,51 @@
 					<p class="py-4">Number of cards: <span class="font-bold">{sum}</span></p>
 				</div>
 				<div class="w-1/3">
-					<Textarea
-						bind:value={output}
-						class="w-full resize-none"
-						readonly
-						placeholder="Your formatted list..."
-					></Textarea>
+					<div
+						class="mb-4 flex w-full resize-none flex-col justify-start border-gray-300 p-2"
+						class:border={scryCards.length > 0}
+					>
+						{#each scryCards as card (card)}
+							<Tooltip.Provider>
+								<Tooltip.Root disableHoverableContent delayDuration="200">
+									<Tooltip.Trigger class="text-left">
+										{#if card.scryfall_uri}
+											<a href={card.scryfall_uri} rel="external" target="_blank">
+												<span class="text-left">{card.count}{stringAfterNumber} {card.name}</span>
+											</a>
+										{:else}
+											<span class="flex flex-row gap-2 text-left"
+												>{card.count}{stringAfterNumber}
+												{card.name}
+												<div class="pt-1 text-yellow-200">
+													<Error></Error>
+												</div>
+											</span>
+										{/if}
+									</Tooltip.Trigger>
+									{#if card.scryfall_image_uri}
+										<Tooltip.Content>
+											<img src={card.scryfall_image_uri} alt="" class="h-40" />
+										</Tooltip.Content>
+									{/if}
+								</Tooltip.Root>
+							</Tooltip.Provider>
+						{/each}
+					</div>
+					{#if scryCards.length != 0}
+						<Button.Root
+							class="bg-indigo-300"
+							onclick={async () => {
+								await navigator.clipboard.writeText(
+									scryCards
+										.map((el) => {
+											return el.count + stringAfterNumber + " " + el.name;
+										})
+										.join("\n")
+								);
+							}}><Copy></Copy>Copy List</Button.Root
+						>
+					{/if}
 				</div>
 			</div>
 			<div class="flex w-full justify-center gap-5 px-4 py-8">
